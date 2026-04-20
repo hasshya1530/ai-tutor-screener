@@ -1,5 +1,3 @@
-# backend/evaluator.py
-
 import os
 import requests
 import json
@@ -7,61 +5,71 @@ import re
 from dotenv import load_dotenv
 from pathlib import Path
 
-# ── ENVIRONMENT SETUP ────────────────────────────────────────────────────────
-# 1. Try to load .env if it exists (for local development)
+# Load environment variables
 env_path = Path(__file__).parent.parent / ".env"
 if env_path.exists():
     load_dotenv(dotenv_path=env_path)
 
-# 2. Get API Key (Render will provide this via system environment)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
 GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_MODEL = "llama-3.1-8b-instant"
-# ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_answer(question: str, answer: str) -> dict:
     """
-    Sends question + answer to Groq API (Llama3).
-    Returns structured evaluation dict.
+    Evaluates a candidate's transcript against pedagogical and soft-skill metrics.
+    Handles edge cases like empty transcripts or API failures.
     """
+    
+    # ── EDGE CASE: EMPTY TRANSCRIPT ──
+    clean_answer = answer.strip()
+    if not clean_answer or len(clean_answer.split()) < 3:
+        return _fallback_evaluation(
+            "The candidate provided no substantial answer or the audio was too short to process.",
+            verdict="Rejected"
+        )
+
+    # ── EDGE CASE: REFUSAL / "I DON'T KNOW" ──
+    refusal_keywords = ["don't know", "skip", "no idea", "not sure", "don't understand"]
+    if any(phrase in clean_answer.lower() for phrase in refusal_keywords) and len(clean_answer.split()) < 10:
+        return _fallback_evaluation(
+            "Candidate expressed inability to answer the question or lack of confidence.",
+            verdict="Rejected"
+        )
 
     if not GROQ_API_KEY:
-        return _fallback_evaluation(
-            "GROQ_API_KEY not found. Please add it to Render Environment Variables."
-        )
-
-    # If the transcript is empty or too short, don't waste an API call
-    if not answer or len(answer.strip()) < 5:
-        return _fallback_evaluation(
-            "The transcript is too short or empty to evaluate. Please try recording again."
-        )
+        return _fallback_evaluation("System Error: GROQ_API_KEY not configured.")
 
     system_message = (
-        "You are an expert education evaluator. "
-        "Respond ONLY with a valid JSON object. No markdown, no prose."
+        "You are a senior pedagogical evaluator for Cuemath. "
+        "Your goal is to screen tutor candidates based on how they explain math to children. "
+        "You must respond ONLY with a structured JSON object. No conversational filler."
     )
 
-    user_message = f"""Evaluate this tutor candidate response.
+    user_message = f"""Assess the following tutor candidate transcript.
+    
+    QUESTION: {question}
+    TRANSCRIPT: {answer}
 
-QUESTION: {question}
-ANSWER: {answer}
+    Rubric Requirements:
+    1. Simplicity: Ability to explain without complex jargon.
+    2. Warmth: Tone and encouraging language.
+    3. Patience: Willingness to re-explain or wait for the student.
+    4. Clarity: Logical flow of the explanation.
 
-Return ONLY this JSON structure:
-{{
-  "score": <1-10>,
-  "subject_knowledge": "<Poor/Fair/Good/Excellent>",
-  "communication_clarity": "<Poor/Fair/Good/Excellent>",
-  "teaching_approach": "<Poor/Fair/Good/Excellent>",
-  "strengths": "<one sentence>",
-  "improvements": "<one sentence>",
-  "verdict": "<Rejected/Maybe/Shortlisted>"
-}}"""
-
-    headers = {
-        "Authorization": f"Bearer {GROQ_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    Return ONLY this JSON structure:
+    {{
+      "score": <overall_score_1_to_10>,
+      "metrics": {{
+        "simplicity": <1_to_10>,
+        "warmth": <1_to_10>,
+        "patience": <1_to_10>,
+        "clarity": <1_to_10>
+      }},
+      "evidence_quotes": ["direct quote 1", "direct quote 2"],
+      "strengths": "One sentence summary of what they did well.",
+      "improvements": "One sentence of actionable advice.",
+      "verdict": "Shortlisted/Maybe/Rejected"
+    }}"""
 
     payload = {
         "model": GROQ_MODEL,
@@ -69,54 +77,54 @@ Return ONLY this JSON structure:
             {"role": "system", "content": system_message},
             {"role": "user", "content": user_message}
         ],
-        "max_tokens": 500,
-        "temperature": 0.1
+        "temperature": 0.1, # Low temperature for consistent JSON
+        "response_format": { "type": "json_object" }
     }
 
     try:
-        response = requests.post(GROQ_API_URL, headers=headers, json=payload, timeout=20)
-
+        response = requests.post(
+            GROQ_API_URL, 
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"}, 
+            json=payload, 
+            timeout=25
+        )
+        
         if response.status_code != 200:
-            return _fallback_evaluation(f"Groq API Error {response.status_code}: {response.text[:100]}")
+            return _fallback_evaluation(f"Upstream API Error ({response.status_code})")
 
-        result = response.json()
-        raw_text = result["choices"][0]["message"]["content"]
-        return _parse_evaluation_json(raw_text)
+        raw_content = response.json()["choices"][0]["message"]["content"]
+        return _safe_json_parse(raw_content)
 
     except Exception as e:
-        return _fallback_evaluation(f"Evaluation request failed: {str(e)}")
+        return _fallback_evaluation(f"Internal Evaluation Error: {str(e)}")
 
-def _parse_evaluation_json(raw_text: str) -> dict:
-    """Safely extracts JSON from LLM output."""
+def _safe_json_parse(raw_text: str) -> dict:
+    """Attempts multiple strategies to extract valid JSON from LLM output."""
     raw_text = raw_text.strip()
     
+    # Strategy 1: Direct Parse
     try:
-        # Try finding the first '{' and last '}' to handle LLM conversational filler
-        start = raw_text.find("{")
-        end = raw_text.rfind("}") + 1
-        if start != -1 and end != 0:
-            json_str = raw_text[start:end]
-            return _validate_and_clean(json.loads(json_str))
-        return _validate_and_clean(json.loads(raw_text))
-    except Exception:
-        return _fallback_evaluation("Failed to parse evaluation result.")
+        return json.loads(raw_text)
+    except json.JSONDecodeError:
+        pass
 
-def _validate_and_clean(parsed: dict) -> dict:
-    """Ensures all required keys exist and types are correct."""
-    required_keys = ["score", "subject_knowledge", "communication_clarity", "teaching_approach", "strengths", "improvements", "verdict"]
-    for key in required_keys:
-        if key not in parsed:
-            parsed[key] = "N/A"
-    return parsed
+    # Strategy 2: Extract block between curly braces (handles LLM "chatter")
+    match = re.search(r'\{.*\}', raw_text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except:
+            pass
 
-def _fallback_evaluation(error_message: str) -> dict:
-    """Fallback when things go wrong."""
+    return _fallback_evaluation("The AI output could not be parsed into a structured report.")
+
+def _fallback_evaluation(error_msg: str, verdict: str = "Error") -> dict:
+    """Returns a valid schema even when evaluation fails."""
     return {
         "score": 0,
-        "subject_knowledge": "N/A",
-        "communication_clarity": "N/A",
-        "teaching_approach": "N/A",
-        "strengths": "Error during evaluation",
-        "improvements": error_message,
-        "verdict": "Error"
+        "metrics": {"simplicity": 0, "warmth": 0, "patience": 0, "clarity": 0},
+        "evidence_quotes": [],
+        "strengths": "N/A",
+        "improvements": error_msg,
+        "verdict": verdict
     }

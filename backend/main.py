@@ -68,19 +68,38 @@ def health():
 def get_questions():
     return {"questions": INTERVIEW_QUESTIONS}
 
+@app.post("/questions/add")
+async def add_question(
+    subject: str = Form(...),
+    question: str = Form(...),
+    difficulty: str = Form("Medium")
+):
+    global _next_id
+    
+    if difficulty not in ["Easy", "Medium", "Hard"]:
+        raise HTTPException(status_code=400, detail="Difficulty must be Easy, Medium, or Hard")
+
+    new_question = {
+        "id": _next_id,
+        "subject": subject.strip(),
+        "question": question.strip(),
+        "difficulty": difficulty
+    }
+    INTERVIEW_QUESTIONS.append(new_question)
+    _next_id += 1
+    return {"message": "Question added successfully", "question": new_question}
+
 @app.post("/evaluate-text")
 async def evaluate_text_endpoint(
     answer: str = Form(...), 
-    question_id: str = Form(...) # Form data often comes in as string
+    question_id: str = Form(...)
 ):
-    # Convert id to int for comparison
     qid = int(question_id)
     question_text = next((q["question"] for q in INTERVIEW_QUESTIONS if q["id"] == qid), None)
     
     if not question_text:
         raise HTTPException(status_code=404, detail="Question not found")
     
-    # Directly evaluate text without transcription
     evaluation = evaluate_answer(question_text, answer)
     
     return {
@@ -101,10 +120,7 @@ async def evaluate_endpoint(audio: UploadFile = File(...), question_id: str = Fo
     audio_bytes = await audio.read()
     extension = (audio.filename or "audio.wav").rsplit(".", 1)[-1].lower()
     
-    # Step 1: Transcribe (Ensure transcriber.py is using Groq Whisper now!)
     transcript = transcribe_audio(audio_bytes, extension)
-    
-    # Step 2: Evaluate
     evaluation = evaluate_answer(question_text, transcript)
     
     return {
@@ -121,12 +137,15 @@ if os.path.exists(static_dir):
 
     @app.get("/{full_path:path}")
     async def serve_react(full_path: str):
-        # Allow these paths to pass through to the API if they weren't matched above
-        api_paths = ["questions", "health", "transcribe", "evaluate", "evaluate-text"]
-        if full_path in api_paths:
+        # List of API keywords to ignore so they don't accidentally serve HTML for a 404 API call
+        # Added 'questions/add' here to ensure it's not swallowed by the UI router
+        api_paths = ["questions", "questions/add", "health", "transcribe", "evaluate", "evaluate-text"]
+        
+        if any(full_path == path for path in api_paths) or full_path.startswith("api"):
              raise HTTPException(status_code=404)
         
-        return FileResponse(os.path.join(static_dir, "index.html"))
+        index_path = os.path.join(static_dir, "index.html")
+        return FileResponse(index_path)
 else:
     @app.get("/")
     def warn_no_ui():
@@ -134,6 +153,5 @@ else:
 
 if __name__ == "__main__":
     import uvicorn
-    # Use environment variable for port if provided by Render
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

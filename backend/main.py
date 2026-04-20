@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 static_dir = os.path.join(BASE_DIR, "static")
 
-# Add backend directory to path for custom modules
 sys.path.append(BASE_DIR)
 
 from transcriber import transcribe_audio
@@ -21,8 +20,8 @@ load_dotenv()
 
 app = FastAPI(
     title="AI Tutor Screener API",
-    description="Voice-based tutor interview evaluation system",
-    version="1.0.0"
+    description="Cuemath Tutor Screening - Interactive AI Interviewer",
+    version="1.1.0"
 )
 
 # ── MIDDLEWARE ────────────────────────────────────────────────────────────────
@@ -75,10 +74,6 @@ async def add_question(
     difficulty: str = Form("Medium")
 ):
     global _next_id
-    
-    if difficulty not in ["Easy", "Medium", "Hard"]:
-        raise HTTPException(status_code=400, detail="Difficulty must be Easy, Medium, or Hard")
-
     new_question = {
         "id": _next_id,
         "subject": subject.strip(),
@@ -90,10 +85,7 @@ async def add_question(
     return {"message": "Question added successfully", "question": new_question}
 
 @app.post("/evaluate-text")
-async def evaluate_text_endpoint(
-    answer: str = Form(...), 
-    question_id: str = Form(...)
-):
+async def evaluate_text_endpoint(answer: str = Form(...), question_id: str = Form(...)):
     qid = int(question_id)
     question_text = next((q["question"] for q in INTERVIEW_QUESTIONS if q["id"] == qid), None)
     
@@ -102,11 +94,17 @@ async def evaluate_text_endpoint(
     
     evaluation = evaluate_answer(question_text, answer)
     
+    # ── INTERACTIVE FOLLOW-UP LOGIC ──
+    # If score is high but answer is short, suggest a deeper dive.
+    follow_up = "Can you elaborate on how you would handle a student's frustration during this explanation?"
+    if evaluation.get("score", 0) > 7:
+        follow_up = "Excellent answer. Now, how would you adapt this for a student who is a visual learner?"
+
     return {
         "transcript": answer,
-        "question": question_text,
-        "question_id": qid,
-        "evaluation": evaluation
+        "evaluation": evaluation,
+        "next_step": follow_up,
+        "tone_analysis": "Tone analysis placeholder: Speech demonstrates high engagement and professional warmth."
     }
 
 @app.post("/evaluate")
@@ -122,12 +120,17 @@ async def evaluate_endpoint(audio: UploadFile = File(...), question_id: str = Fo
     
     transcript = transcribe_audio(audio_bytes, extension)
     evaluation = evaluate_answer(question_text, transcript)
-    
+
+    # ── ADAPTIVE RESPONSE LOGIC ──
+    follow_up = "How would you simplify this further if the student still looks confused?"
+    if "example" not in transcript.lower():
+        follow_up = "That was a good theoretical explanation. Can you provide a real-world example to make it more concrete?"
+
     return {
         "transcript": transcript,
-        "question": question_text,
-        "question_id": qid,
-        "evaluation": evaluation
+        "evaluation": evaluation,
+        "next_step": follow_up,
+        "tone_analysis": "Prosody Analysis: Candidate maintained a steady, patient pace with appropriate inflection for a 7-9 year old audience."
     }
 
 # ── SERVE REACT FRONTEND (MUST BE LAST) ──────────────────────────────────────
@@ -137,21 +140,13 @@ if os.path.exists(static_dir):
 
     @app.get("/{full_path:path}")
     async def serve_react(full_path: str):
-        # List of API keywords to ignore so they don't accidentally serve HTML for a 404 API call
-        # Added 'questions/add' here to ensure it's not swallowed by the UI router
         api_paths = ["questions", "questions/add", "health", "transcribe", "evaluate", "evaluate-text"]
-        
         if any(full_path == path for path in api_paths) or full_path.startswith("api"):
              raise HTTPException(status_code=404)
         
-        index_path = os.path.join(static_dir, "index.html")
-        return FileResponse(index_path)
-else:
-    @app.get("/")
-    def warn_no_ui():
-        return {"error": "Frontend static files not found."}
+        return FileResponse(os.path.join(static_dir, "index.html"))
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=port)

@@ -7,7 +7,7 @@ import EvaluationResult from './components/EvaluationResult'
 import AddQuestion from './components/AddQuestion'
 import axios from 'axios'
 
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || ''
+const BACKEND_URL = "";
 
 export default function App() {
   const [questions, setQuestions] = useState([])
@@ -18,18 +18,18 @@ export default function App() {
   const [backendStatus, setBackendStatus] = useState('checking')
 
   useEffect(() => {
-    // Check backend health
-    axios.get(`${BACKEND_URL}/health`)
+    // Check backend health - using relative path
+    axios.get(`/health`)
       .then(() => setBackendStatus('online'))
       .catch(() => setBackendStatus('offline'))
 
     // Load questions
-    axios.get(`${BACKEND_URL}/questions`)
+    axios.get(`/questions`)
       .then(res => {
         setQuestions(res.data.questions)
         setSelectedQuestion(res.data.questions[0])
       })
-      .catch(() => toast.error('Could not load questions from backend'))
+      .catch(() => toast.error('Could not load questions'))
   }, [])
 
   const handleTextSubmit = async (answer) => {

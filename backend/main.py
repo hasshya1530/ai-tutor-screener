@@ -8,7 +8,6 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 
 # ── PATH CONFIGURATION ────────────────────────────────────────────────────────
-# Define these at the top so they are available to all routes
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 static_dir = os.path.join(BASE_DIR, "static")
 
@@ -59,109 +58,82 @@ INTERVIEW_QUESTIONS = [
 
 _next_id = 4
 
-# ── RESPONSE MODELS ───────────────────────────────────────────────────────────
-class TranscribeResponse(BaseModel):
-    transcript: str
-    question_id: int
-    question: str
-
-class EvaluationResponse(BaseModel):
-    transcript: str
-    question: str
-    evaluation: dict
-
 # ── API ENDPOINTS ─────────────────────────────────────────────────────────────
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "static_dir_exists": os.path.exists(static_dir)}
+    return {"status": "online", "static_dir_exists": os.path.exists(static_dir)}
 
 @app.get("/questions")
 def get_questions():
     return {"questions": INTERVIEW_QUESTIONS}
 
-@app.get("/questions/{question_id}")
-def get_question(question_id: int):
-    for q in INTERVIEW_QUESTIONS:
-        if q["id"] == question_id:
-            return q
-    raise HTTPException(status_code=404, detail="Question not found")
-
-@app.post("/questions/add")
-async def add_question(
-    subject: str = Form(...),
-    question: str = Form(...),
-    difficulty: str = Form("Medium")
+@app.post("/evaluate-text")
+async def evaluate_text_endpoint(
+    answer: str = Form(...), 
+    question_id: str = Form(...) # Form data often comes in as string
 ):
-    global _next_id
-    if difficulty not in ["Easy", "Medium", "Hard"]:
-        raise HTTPException(status_code=400, detail="Difficulty must be Easy, Medium, or Hard")
-
-    new_question = {
-        "id": _next_id,
-        "subject": subject.strip(),
-        "question": question.strip(),
-        "difficulty": difficulty
-    }
-    INTERVIEW_QUESTIONS.append(new_question)
-    _next_id += 1
-    return {"message": "Question added successfully", "question": new_question}
-
-@app.post("/transcribe", response_model=TranscribeResponse)
-async def transcribe_endpoint(audio: UploadFile = File(...), question_id: int = Form(...)):
-    question_text = next((q["question"] for q in INTERVIEW_QUESTIONS if q["id"] == question_id), None)
+    # Convert id to int for comparison
+    qid = int(question_id)
+    question_text = next((q["question"] for q in INTERVIEW_QUESTIONS if q["id"] == qid), None)
+    
     if not question_text:
-        raise HTTPException(status_code=404, detail="Invalid question_id")
+        raise HTTPException(status_code=404, detail="Question not found")
     
-    audio_bytes = await audio.read()
-    filename = audio.filename or "audio.wav"
-    extension = filename.rsplit(".", 1)[-1].lower()
+    # Directly evaluate text without transcription
+    evaluation = evaluate_answer(question_text, answer)
     
-    try:
-        transcript = transcribe_audio(audio_bytes, extension)
-        return TranscribeResponse(transcript=transcript, question_id=question_id, question=question_text)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {
+        "transcript": answer,
+        "question": question_text,
+        "question_id": qid,
+        "evaluation": evaluation
+    }
 
 @app.post("/evaluate")
-async def evaluate_endpoint(audio: UploadFile = File(...), question_id: int = Form(...)):
-    question_text = next((q["question"] for q in INTERVIEW_QUESTIONS if q["id"] == question_id), None)
+async def evaluate_endpoint(audio: UploadFile = File(...), question_id: str = Form(...)):
+    qid = int(question_id)
+    question_text = next((q["question"] for q in INTERVIEW_QUESTIONS if q["id"] == qid), None)
+    
     if not question_text:
         raise HTTPException(status_code=404, detail="Invalid question_id")
     
     audio_bytes = await audio.read()
     extension = (audio.filename or "audio.wav").rsplit(".", 1)[-1].lower()
     
+    # Step 1: Transcribe (Ensure transcriber.py is using Groq Whisper now!)
     transcript = transcribe_audio(audio_bytes, extension)
+    
+    # Step 2: Evaluate
     evaluation = evaluate_answer(question_text, transcript)
     
     return {
         "transcript": transcript,
         "question": question_text,
-        "question_id": question_id,
+        "question_id": qid,
         "evaluation": evaluation
     }
 
-# ── SERVE REACT FRONTEND ──────────────────────────────────────────────────────
+# ── SERVE REACT FRONTEND (MUST BE LAST) ──────────────────────────────────────
 
-# Serve static files if the directory exists (Production/Docker)
 if os.path.exists(static_dir):
-    # Mount the assets directory specifically for Vite's JS/CSS
     app.mount("/assets", StaticFiles(directory=os.path.join(static_dir, "assets")), name="assets")
 
     @app.get("/{full_path:path}")
     async def serve_react(full_path: str):
-        # Prevent API routes from being intercepted by the catch-all
-        if full_path.startswith("api") or full_path in ["questions", "health", "transcribe", "evaluate"]:
+        # Allow these paths to pass through to the API if they weren't matched above
+        api_paths = ["questions", "health", "transcribe", "evaluate", "evaluate-text"]
+        if full_path in api_paths:
              raise HTTPException(status_code=404)
         
-        index_path = os.path.join(static_dir, "index.html")
-        return FileResponse(index_path)
+        return FileResponse(os.path.join(static_dir, "index.html"))
 else:
     @app.get("/")
     def warn_no_ui():
-        return {"error": "Frontend static files not found. Ensure the build step completed."}
+        return {"error": "Frontend static files not found."}
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Use environment variable for port if provided by Render
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
